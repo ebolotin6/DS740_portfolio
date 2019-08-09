@@ -1,6 +1,6 @@
 ---
 title: "DS740: Midterm"
-author: "Eli (Ilya) Bolotin"
+author: "Eli Bolotin"
 date: "6/23/2019"
 output: pdf_document
 header-includes:
@@ -104,8 +104,7 @@ x = model.matrix(Retailprice~., data=cars)[,c(-1)]
 * For the ensuing analysis, we retain 387 observations with complete, non-missing data for each variable.
 
 ### Next, analyze the distribution of the response variable, test for normality, and plot observations
-
-```{r echo = TRUE, eval = TRUE}
+```{r echo = TRUE, eval = TRUE, tidy = TRUE}
 # create histogram of retail prices
 hist(cars$Retailprice, main = "Histogram of Retail price", xlab = "Retail Price")
 
@@ -361,6 +360,255 @@ The final model (RandomForest with mtry=7), produces the following CV and R2 sco
 Given the small size of this dataset, the MSE and R2 scores achieved through RandomForest regression with double CV10 and OOB predictions indicate that this model shows promise of delivering accurate predictions on test data. The final RandomForest model, when fitted to the full dataset, produces an R2 of nearly 0.96.
 
 The most important (positively correlated) predictors on retail price were: horsepower, wheelbase, cylinders, height, and highway mpg. Furthermore, the plot of variable importance indicates that the final model could benefit in accuracy by excluding certain predictors such as "pickup".
+
+# Appendix
+
+Below you will find various regression models performed with 10-fold cross validation. Please find the table at the bottom for a comparison of MSE and R2 for all models tested in this exercise.
+
+## Perform double 10-fold CV with RandomForest regression (using methodology taught in class):
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# create sampling groups
+p = dim(cars)[2]-1
+m = p - 1 # m is the predictor subset size
+folds = 10
+groups.out = c(rep(1:folds,floor(n/folds)), 1:(n%%folds))
+set.seed(3)
+cvgroups.out = sample(groups.out, n)
+rf.doublecv10.predictions = rep(NA, n)
+
+# perform outer cross-validation loop
+for (i in 1:folds)  {
+  train = (cvgroups.out != i)
+  test = (cvgroups.out == i)
+  num.train.obs = dim(x[train,])[1]
+  
+  # create groups for train/test observations
+  if ((num.train.obs%%folds) == 0) {
+      groups.in= rep(1:folds,floor(num.train.obs/folds))
+  } else {
+      groups.in=c(rep(1:folds,floor(num.train.obs/folds)),(1:(num.train.obs%%folds)))
+  }
+  
+  cvgroups.in = sample(groups.in, num.train.obs)
+
+  # store MSE for every m
+  mtry_matrix = matrix(NA, nr=m, nc=folds)
+  
+  # loop through every subset of predictors 'm'
+  for(j in 1:m) {
+    # for every 'm', perform CV10 with resampled cvgroups
+    for(k in 1:folds) {
+      rf.cv10 <- randomForest(Retailprice~., data=cars[train,], subset=cvgroups.in, mtry=j, importance=TRUE)
+      mtry_matrix[j,k] <- mean(rf.cv10$mse) # take mean MSE of out-of-bag predictions for this fold and model
+    }
+  }
+  
+  lowest_mse <- apply(mtry_matrix, 1, mean)
+  best_m <- order(lowest_mse)[1]
+  rf.doublecv10 <- randomForest(Retailprice~., data=cars[train,], mtry=best_m, importance=TRUE)
+  rf.doublecv10.predictions[test] = predict(rf.doublecv10, newdata=cars[test,], type="response")
+}
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+rf.doublecv10.mse = mean((rf.doublecv10.predictions-y)^2)
+rf.doublecv10.R2 = 1-sum((rf.doublecv10.predictions-y)^2)/sum((y-mean(y))^2)
+cat("RF double CV10 MSE: ", rf.doublecv10.mse, "\n")
+cat("RF double CV10 R2: ", rf.doublecv10.R2, "\n")
+models_cv[4] <- rf.doublecv10.mse
+models_r2[4] <- rf.doublecv10.R2
+```
+
+## Bagging: CV10
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+set.seed(3)
+
+# store predictions for randomForest
+predict.rf = rep(-1,n)
+predict.bagging = rep(-1,n)
+
+# loop through every fold, train models, and make predictions
+for(i in 1:k) {
+  train = (cvgroups != i)
+  test = (cvgroups == i)
+  bagging.cv <- randomForest(Retailprice~., data=cars[train,], mtry=14, importance=TRUE)
+  predict.bagging[test] = predict(bagging.cv, newdata=cars[test,], type="response")
+}
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# Calculate CV error and R2 for both randomforest and bagging
+bagging_cv_error <- mean((predict.bagging-y)^2)
+bagging_R2 = 1-sum((predict.bagging-y)^2)/sum((y-mean(y))^2)
+cat("Bagging CV10 error: ", bagging_cv_error, "\n")
+cat("Bagging R2: ", bagging_R2, "\n")
+models_cv[5] <- bagging_cv_error
+models_r2[5] <- bagging_R2
+```
+
+## Boosting: CV10
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+set.seed(3)
+# store predictions for gbm (boosting)
+predict.gbm = rep(-1,n)
+
+# loop through every fold, train models, and make predictions
+for(i in 1:k) {
+  train = (cvgroups != i)
+  test = (cvgroups == i)
+  cv.gbm <- gbm(Retailprice~., data=cars[train,], distribution="gaussian", n.trees=5000, interaction.depth=4, shrinkage=.001)
+  predict.gbm[test] = predict(cv.gbm, newdata=cars[test,], n.trees=5000, type="response")
+}
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# Calculate CV error and R2 for boosting
+gbm_cv_error <- mean((predict.gbm-y)^2)
+gbm_r2 = 1-sum((predict.gbm-y)^2)/sum((y-mean(y))^2)
+cat("Boosting CV10 error: ", gbm_cv_error, "\n")
+cat("Boosting R2: ", gbm_r2, "\n")
+models_cv[6] <- gbm_cv_error
+models_r2[6] <- gbm_r2
+```
+
+## Multiple Linear Regression: CV10
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+set.seed(3)
+# store predictions for lm cv
+predict.lm = rep(-1,n)
+
+# loop through every fold, train models, and make predictions
+for(i in 1:k) {
+  train = (cvgroups != i)
+  test = (cvgroups == i)
+  glm.fit = glm(Retailprice~., data=cars[train,])
+  predict.lm[test] <- predict(glm.fit, cars[test,])
+}
+```
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=FALSE}
+vif(glm.fit)
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# Calculate MSE on full data predictions
+lm_cv <- mean((predict.lm-y)^2)
+lm_r2 = 1-sum((predict.lm-y)^2)/sum((y-mean(y))^2)
+cat("LM CV error: ", lm_cv, "\n")
+cat("LM R2: ", lm_r2, "\n")
+models_cv[7] <- lm_cv
+models_r2[7] <- lm_r2
+```
+
+## Regsubsets: CV10
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# Define predict function for regsubsets
+predict.regsubsets <- function(object, newdata, id, ...) {
+  form = as.formula(object$call[[2]])
+  mat = model.matrix(form, newdata)
+  coefi = coef(object, id=id)
+  xvars = names(coefi)
+  mat[ , xvars] %*% coefi
+}
+```
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# specify num observations, num max predictors, and groups to designate each observation to
+p = dim(cars)[2]-2
+
+# set seed, create sample from groups, create matrix to store MSE error for every model of each fold
+group.error = matrix(NA, nr=p, nc=k)
+regsub.preds = matrix(NA, nr=length(y), nc=p)
+
+# loop through every fold, generate regsubsets models
+for(i in 1:k) {
+  set.seed(3)
+  train = (cvgroups != i)
+  test = (cvgroups == i)
+  regsub.cv = regsubsets(Retailprice~., data = cars[train,], nvmax=p)
+  
+  # for every regsubsets model, predict Y on the current fold and then calculate MSE using actual Y
+  for(j in 1:p) {
+    regsub.preds[test,j] = predict(regsub.cv, newdata = cars[test,], id=j)
+    group.error[j,i] = mean((regsub.preds[test,j] - y[test])^2)
+  }
+}
+```
+
+### Calculate mean MSE per model across all folds
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+# calculate mean MSE for every model
+mean.cv.errors = apply(group.error, 1, mean)
+
+# select best model by lowest mean MSE
+best.model = order(mean.cv.errors)[1]
+
+# get best model coefs
+coef(regsub.cv, id=best.model)
+
+# plot MSE vs model
+par(mfrow=c(1,1))
+plot(mean.cv.errors, type="b")
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+regsubsets_cv <- mean((regsub.preds[,best.model]-y)^2)
+regsubsets_r2 = 1-sum((regsub.preds[,best.model]-y)^2)/sum((y-mean(y))^2)
+cat("Regsubsets best model (8) CV10 error: ", regsubsets_cv, "\n")
+cat("Regsubsets best model R2: ", regsubsets_r2, "\n")
+models_cv[8] <- regsubsets_cv
+models_r2[8] <- regsubsets_r2
+```
+
+## KNN: CV10
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+set.seed(3)
+# store predictions for knn cv
+predict.knn = rep(-1,n)
+
+# loop through every fold, train models, and make predictions
+for(i in 1:k) {
+  train = (cvgroups != i)
+  test = (cvgroups == i)
+  knn.fit <- knn.reg(x[train,], x[test,], y[train], k = 3, algorithm=c("kd_tree"))
+  predict.knn[test] <- knn.fit$pred
+}
+```
+
+### Calculate CV10 and R2 scores:
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+knn_cv <- mean((predict.knn-y)^2)
+knn_r2 = 1-sum((predict.knn-y)^2)/sum((y-mean(y))^2)
+cat("KNN CV error: ", knn_cv, "\n")
+cat("KNN R2: ", knn_r2, "\n")
+models_cv[9] <- knn_cv
+models_r2[9] <- knn_r2
+```
+
+### Comparison of all models
+
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+model_assessment <- cbind(model_names, models_cv, models_r2)
+model_assessment
+```
 
 # Sources:
 
