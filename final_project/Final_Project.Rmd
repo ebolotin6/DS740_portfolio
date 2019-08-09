@@ -1,0 +1,736 @@
+---
+title: "DS 740: Final Project"
+description: "DS 740"
+author: "Eli Bolotin"
+date: "7/26/2019"
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+    df_print: default
+header-includes:
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages and functions
+
+```{r message=FALSE, warning=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(randomForest, mltools, data.table, e1071, caret, doParallel, R.utils, neuralnet, QuantPsych, prcomp, pROC)
+```
+
+## Create helper functions
+
+Create helper functions to perform preprocessing tasks:
+
+1. Check skewness of predictors
+2. Print confusion matrix and prediction accuracy
+3. Generate cv groups
+
+```{r message=FALSE, warning=FALSE}
+check_skewness <- function(df, numeric_cols) {
+  skew_list <- c()
+  par(mfrow=c(5,4), mar=c(3,1,1,1)) 
+  for(i in numeric_cols){
+    feature_skewness <- skewness(na.omit(df[, i]))
+    skew_list <- c(skew_list, feature_skewness)
+    title_and_skewness <- paste(i,': ', round(feature_skewness,2))
+    hist(df[,i], main = title_and_skewness)
+  }
+  skewness_df <- data.frame("skewness" = skew_list, "features" = numeric_cols)
+  return(skewness_df)
+}
+
+get_accuracy <- function(predictions, actuals, print_cm = "yes") {
+  cm <- addmargins(table(predictions, actuals))
+  if(print_cm == "yes") {
+    print(cm)
+  }
+  diag.cm <- diag(cm)
+  len_diag <- length(diag.cm)
+  accuracy <- sum(diag.cm[-len_diag])/diag.cm[len_diag]
+  return(as.numeric(accuracy))
+}
+
+generate_cvgroups <- function(k, n) {
+  if ((n %% k) == 0) {
+      groups = rep(1:k, floor(n/k))
+  } else {
+      groups = c(rep(1:k, floor(n/k)), (1:(n %% k)))
+  }
+  cvgroups = sample(groups, n)
+  return(cvgroups)
+}
+
+test_empty_col <- function(x) {
+  empty_col = 0
+  if(all(x %in% 0)) {
+    empty_col = empty_col + 1
+  }
+  return(empty_col)
+}
+```
+
+# Data loading and evaluation
+
+```{r message=FALSE, warning=FALSE}
+data <- read.csv("weatherAUS.csv", na.strings=c("", "NA"))
+dim(data)
+```
+
+## Examine data
+
+```{r}
+head(data)
+```
+
+## Examine column types
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+col.types <- sapply(data, class)
+
+factor.cols <- names(col.types[col.types=="factor"])
+numeric.cols <- names(col.types[col.types!="factor"])
+cat("Factor columns: ", length(factor.cols), "\n")
+factor.cols
+cat("Numeric columns: ", length(numeric.cols), "\n")
+numeric.cols
+```
+
+## Examine skewness of numeric variables
+
+```{r}
+skewness_of_data <- check_skewness(data, numeric.cols)
+```
+
+Data appears mostly Gaussian.
+
+# Data preprocessing and transformation
+
+## Create predictor to indicate percent of prior 10 days rain
+
+I do this first (before dropping NAs) because the data is chronologically ordered by day.
+
+```{r}
+n_rows <- nrow(data)
+prior_days_rain <- rep(NA, n_rows)
+days_prior = 10
+
+for(i in 1:n_rows) {
+  if(i == 1) {
+    percent_rain <- 0
+    next
+  } else if (i - 1 < days_prior) {
+    window_start = 1
+    window_stop = i - 1
+  } else {
+    window_start = i - days_prior
+    window_stop = i - 1
+  }
+  tbl <- table(data$RainToday[window_start:window_stop])
+  percent_rain <- round(tbl["Yes"]/sum(tbl), 2)
+  prior_days_rain[i] <- percent_rain
+}
+
+prior_days_rain <- replace_na(prior_days_rain)
+data["prior_days_rain"] <- prior_days_rain
+```
+
+## Create new predictors to capture time lag of *RainToday*
+
+```{r}
+n_rows <- nrow(data)
+lag_1_rain <- rep(NA, n_rows)
+lag_2_rain <- rep(NA, n_rows)
+lag_3_rain <- rep(NA, n_rows)
+
+for(i in 4:n_rows) {
+  lag_1 <- data$RainToday[i - 1]
+  lag_2 <- data$RainToday[i - 2]
+  lag_3 <- data$RainToday[i - 3]
+  lag_1_rain[i] <- lag_1
+  lag_2_rain[i] <- lag_2
+  lag_3_rain[i] <- lag_3
+}
+
+lag_1_rain <- replace_na(lag_1_rain)
+lag_2_rain <- replace_na(lag_2_rain)
+lag_3_rain <- replace_na(lag_3_rain)
+
+data["lag_1_rain"] <- as.factor(ifelse(lag_1_rain==2, "Yes", "No"))
+data["lag_2_rain"] <- as.factor(ifelse(lag_2_rain==2, "Yes", "No"))
+data["lag_3_rain"] <- as.factor(ifelse(lag_3_rain==2, "Yes", "No"))
+
+data <- data[-c(1:3),]
+```
+
+## Drop Risk_MM (correlated to response) and date (captured via new predictors)
+
+```{r}
+'%ni%' <- Negate('%in%')
+df_names <- colnames(data)
+filtered_names <- df_names[df_names %ni% c("RISK_MM","Date")]
+data <- data[, filtered_names]
+```
+
+## Evaluate variables with high missingness (>= 30%)
+
+```{r}
+n_rows <- dim(data)[1]
+n_cols <- dim(data)[2]
+missingness <- list()
+i = 1
+
+for(col in 1:n_cols) {
+  num_na <- length(which(is.na(data[,col])))
+  if(num_na/n_rows >= .30) {
+    missingness[i] <- col
+    i = i + 1
+  }
+}
+
+missingness <- as.numeric(missingness)
+missingness_cols <- colnames(data)[missingness]
+cat("Variables with 30% or more missingness:\n", missingness_cols)
+```
+
+Despite the high level of missingness, these are potentially important predictors. It's worth keeping them and removing a higher percentage of total NAs (because of these columns) - if we have an abundance of data afterwards. To find out, let's check NA count. 
+
+## Check NA count
+
+```{r echo=T, results='hide'}
+total_na_rows <- length(which(apply(data, 1, function(x) (any(x %in% c("", "n/a") | is.na(x))))))
+cat("Total NA rows:", total_na_rows)
+cat("\nTotal rows after NA removal: ", n_rows - total_na_rows)
+```
+Total NA rows: `r total_na_rows`
+Total rows after NA removal: `r n_rows - total_na_rows`
+
+There is an abundance of observations left for analysis after removing all rows with NAs (many caused by columns with high missingness).
+
+## Omit NAs from data
+
+```{r}
+# omit nas
+data <- droplevels(na.omit(data))
+n_rows <- dim(data)[1]
+```
+
+## Review column types and number of levels per factor
+
+```{r}
+col.types <- sapply(data, class)
+
+factor.cols <- names(col.types[col.types=="factor"])
+numeric.cols <- names(col.types[col.types!="factor"])
+
+factor.levels <- list()
+i <- 0
+
+for(col in factor.cols) {
+  factor.levels[col] <- length(levels(data[,col]))
+  i = i + 1
+}
+
+# Get total levels
+sum(as.numeric(factor.levels))
+```
+
+There are `r sum(as.numeric(factor.levels))` levels of categorical predictors... One-hot coding categorical predictors will result in an additional ~`r sum(as.numeric(factor.levels))` extra features in our data.
+
+## One-hot-code factors and create feature sets by type
+
+```{r}
+# get all factors and exclude the response, raintomorrow
+non_target <- which(factor.cols != "RainTomorrow")
+
+x.factors <- data[, factor.cols[non_target]]
+
+# create dataframe of one-hot-coded factors
+x.factors.coded <- one_hot(as.data.table(data[, c(factor.cols[non_target])]))
+
+# create dataframe of numeric predictors
+x.numeric <- data[, numeric.cols]
+
+# create target vector
+y <- as.factor(data$RainTomorrow)
+```
+
+## Create preprocessing, train, and test groups
+
+The reason for a preprocessing group is to have data that is separate from training data that can be used for feature selection without introducing additional bias to the model (to avoid overfitting).
+
+```{r}
+set.seed(3)
+
+n_rows <- nrow(data)
+
+# Sample percent of data for training and testing
+traintest_subset <- round(n_rows * 0.95)
+sub_sample <- sample(1:n_rows, traintest_subset)
+
+# create train/test sampled data
+x.numeric.traintest <- x.numeric[sub_sample,]
+x.factors.coded.traintest <- x.factors.coded[sub_sample,]
+y.traintest <- y[sub_sample]
+
+# create sampled data for preprocessing (feature selection)
+x.numeric.preprocessing <- x.numeric[-sub_sample,]
+x.factors.coded.preprocessing <- x.factors.coded[-sub_sample,]
+y.preprocessing <- y[-sub_sample]
+```
+
+## Scale data
+
+```{r}
+set.seed(3)
+
+# sample 80% of data for training
+total_traintest <- nrow(x.numeric.traintest)
+training_rows <- round(total_traintest * 0.80)
+train_indices = sample(1:total_traintest, training_rows)
+
+# scale train/test data
+x.numeric.train.std <- scale(x.numeric.traintest[train_indices,])
+x.numeric.valid.std = scale(x.numeric.traintest[-train_indices,], center = attr(x.numeric.train.std, "scaled:center"), scale = attr(x.numeric.train.std, "scaled:scale"))
+```
+
+## Finalize *preprocessed*, *train*, and *test* datasets
+
+```{r}
+set.seed(3)
+
+# create train/test sets
+train_data <- data.frame(raintomorrow = y.traintest[train_indices], x.numeric.train.std, x.factors.coded.traintest[train_indices,])
+test_data <- data.frame(raintomorrow = y.traintest[-train_indices], x.numeric.valid.std, x.factors.coded.traintest[-train_indices,])
+
+# preprocessing data for feature selection
+preprocessed_data <- data.frame(raintomorrow = y.preprocessing, scale(x.numeric.preprocessing), x.factors.coded.preprocessing)
+
+# check number of training features
+n_train_features <- ncol(train_data)
+```
+
+# Feature selection
+
+After hot-coding, the training set has `r n_train_features` features (up from 23 originally). Using all of these features is not likely necessary to achieve near maximum prediction accuracy, and worse yet, is very computationally inefficient. To figure out which features to keep, we perform feature selection.
+
+## Identify highly correlated variables
+
+```{r}
+# create (Y,X) correlation matrix 
+corr.matrix <- cor(preprocessed_data[,-1])
+
+# find highly correlated vars to remove
+correlated_predictors <- findCorrelation(corr.matrix, cutoff=0.5)
+
+# check out names
+colnames.pp.data <- colnames(preprocessed_data[,-1])
+most_correlated_features <- colnames.pp.data[correlated_predictors]
+
+cat("Total of", length(most_correlated_features), "correlated features:\n")
+most_correlated_features
+```
+
+Multicollinearity indicates that certain variables are redundant. Due to the high correlation of these predictors, perhaps they could be "combined", so to speak, to be represented in a lower dimensional space that contains a significant amount of variation in the data. This is the idea behind Principal Component Analysis, which we perform next.
+
+## Perform PCA
+
+```{r message=FALSE, warning=FALSE}
+pca_analysis <- prcomp(preprocessed_data[,-1], scale = FALSE)
+
+# biplot of PCA
+biplot(pca_analysis)
+
+# proportion of variance explained by first 10 principal components
+vjs = pca_analysis$sdev^2
+pve = vjs/sum(vjs)
+sum(pve[1:10])
+```
+
+The first 10 principal components explain `r round(sum(pve[1:10]),2)*100`% of total variability.
+
+In the plot above, the red arrows represent the first two PC loading vectors [1]. PC2 (2nd principal component, y-axis) puts most of its emphasis on features that have vertical direction (such as Pressure9am, Pressure3am), while PC1 puts most if its emphasis on features with horizontal direction (such as Temp9a, Max Temp, Evaporation). The black points represent PC scores. The location of score on the plot relative to the loading vectors indicates the magnitude of weather characteristics (features) for a specific day in the dataset.
+
+## Perform feature selection with RFE
+
+Below, we perform backwards selection with recursive feature elimination (based on predictor importance ranking). Random forest is used to perform 5-fold CV on 8 possible predictor subsets. Note that preprocessing is performed on the dataset with PCA.
+
+```{r warning=FALSE}
+start_time <- Sys.time()
+
+# define cores and register parallel computation operation
+cl <- makePSOCKcluster(detectCores())
+registerDoParallel(cl)
+set.seed(6)
+
+# tuning hyperparameters
+p <- ncol(preprocessed_data)-1
+
+# define mtry subsets
+subset_sizes <- seq(6,p,2)[1:8]
+
+# set seed for reproducible results
+seeds <- vector(mode = "list", length = 6)
+for(i in 1:5) seeds[[i]]<- rep(3,9)
+seeds[[6]]<- 3
+
+# perform RFE using best mtry from rf_model
+rfe_control <- rfeControl(functions=rfFuncs, method="cv", number=5, seeds = seeds, returnResamp = T, saveDetails = T)
+rfe_results <- rfe(raintomorrow~., data=preprocessed_data, sizes = subset_sizes, preProcess = "pca",  rfeControl=rfe_control)
+
+stopCluster(cl)
+
+end_time <- Sys.time()
+
+end_time - start_time
+```
+
+## Plot RFE results and review best features
+
+```{r}
+par(mfrow=c(1,3))
+
+print(rfe_results)
+predictors(rfe_results)
+plot(rfe_results, type=c("g", "o"))
+cat("Optimal count of variables is: ", length(rfe_results$optVariables))
+```
+
+## Important notes
+* By using PCA for feature selection, we are sacrificing a small amount of model accuracy to improve model interpretability. This is to say: had we not used PCA preprocessing, the "optimal" model would have many more predictor variables while only improving prediction accuracy by a very small amount.
+* The time lags of RainToday (i.e. lag_1_rain) and prior 10 days rain (prior_days_rain) do not increase predictive accuracy. Therefore, predicting *raintomorrow* is not a matter of cyclical or time-based autoregressive forecasting.
+
+# Model training
+
+Recursive feature eliminaion indicates that for this dataset, prediction accuracy does not increase with the increase of predictor subset sizes. Rather, the most parsimonious model with `r min(rfe_results$results$Variables)` predictors (acc = `r round(rfe_results$results$Accuracy[rfe_results$results$Variables==min(rfe_results$results$Variables)],4)`) is actually slightly better than the most complex model of `r max(rfe_results$results$Variables)` predictors (acc = `r round(rfe_results$results$Accuracy[rfe_results$results$Variables==max(rfe_results$results$Variables)],4)`). We will use the optimal number of predictors (of `r rfe_results$bestSubset` predictors) for training. They are:
+
+* `r rfe_results$optVariables[1:rfe_results$bestSubset]`
+
+## Define model formula
+
+```{r}
+predictors = rfe_results$optVariables[1:rfe_results$bestSubset]
+new_formula <- paste("raintomorrow~",paste(predictors, collapse="+"), sep="")
+new_formula <- as.formula(new_formula)
+```
+
+## Take smaller sample of train/test data
+* Taking a smaller sample of train/test data for computational efficiency. The full sets will be used in final model fitting.
+
+```{r}
+set.seed(3)
+
+n_rows_traindata <- nrow(train_data)
+n_rows_testdata <- nrow(test_data)
+sample_size_train <- round(n_rows_traindata * 0.15)
+sample_size_test <- round(n_rows_testdata * 0.15)
+small_sample_train <- sample(1:n_rows_traindata, sample_size_train)
+small_sample_test <- sample(1:n_rows_testdata, sample_size_test)
+train_data_small <- train_data[small_sample_train,]
+test_data_small <- test_data[small_sample_test,]
+```
+
+Size of full training data: `r nrow(train_data)` records
+
+Size of full test data: `r nrow(test_data)` records
+
+Size of small sample of training data: `r nrow(train_data_small)` records
+
+Size of small sample of test data: `r nrow(test_data_small)` records
+
+## Define function to perform CV-10
+
+Training performed with Bagging and linear SVM
+
+```{r message=FALSE, warning=FALSE}
+cv.rfsvm <- function(k, input_formula, training_data, mtry) {
+  num_train <- nrow(training_data)
+  # store predictions on training data
+  bagging.single.cv.predictions = rep(NA, num_train)
+  svm.single.cv.predictions = rep(NA, num_train)
+  
+  # create CV groups
+  cvgroups = generate_cvgroups(k, num_train)
+  
+  # 10-fold CV
+  iteration_num = 1
+  
+  for(i in 1:k) {
+    printf("\rIteration %d out of %d", iteration_num, k, file = "")
+    
+    # define train/val indices/subset
+    train_indices = (cvgroups != i)
+    val_indices = (cvgroups == i)
+    
+    bagging.fit <- randomForest(input_formula, data = training_data[train_indices,], mtry = mtry)
+    svm.fit = svm(input_formula, data = training_data[train_indices,], kernel = "linear", scale=FALSE, type="C-classification")
+    
+    # perform predictions
+    x_val <- training_data[val_indices,c(predictors)]
+    bagging.single.cv.predictions[val_indices] = predict(bagging.fit, x_val, type="class")
+    svm.single.cv.predictions[val_indices] = predict(svm.fit, x_val, type="class")
+    iteration_num = iteration_num + 1
+  }
+  output = list(bagging.single.cv.predictions, svm.single.cv.predictions)
+  return(output)
+}
+```
+
+## Perform CV-10 on compact training data
+
+```{r echo=TRUE, message=TRUE, warning=FALSE, results='hide'}
+set.seed(3)
+
+start_time <- Sys.time()
+
+single.cv.10 = cv.rfsvm(10, new_formula, train_data_small, mtry = length(predictors))
+bagging.predictions = single.cv.10[[1]]
+svm.predictions = single.cv.10[[2]]
+
+printf("\n")
+end_time <- Sys.time()
+
+end_time - start_time
+```
+
+Calculation time: `r round(end_time - start_time,1)` minutes
+
+### CV-10 score on compact training data
+
+```{r echo=FALSE}
+cat("CV-10 accuracy using top", length(predictors), "predictors: \n\n")
+cat("Bagging: \n")
+bagging.accuracy <- get_accuracy(bagging.predictions, train_data_small$raintomorrow)
+cat("\nAccuracy of bagging: ", bagging.accuracy)
+cat("\n\nSVM: \n")
+svm.accuracy <- get_accuracy(svm.predictions, train_data_small$raintomorrow)
+cat("\nAccuracy of SVM: ", svm.accuracy)
+```
+
+Both models produce comparable CV-10 scores.
+
+### Plot ROC curves for models
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow=c(1,2))
+
+# Bagging ROC
+pROC_obj <- roc(train_data_small$raintomorrow, bagging.predictions,
+            smoothed = T, stratified=FALSE,
+            plot=TRUE, auc.polygon=T, max.auc.polygon=T, grid=TRUE,
+            print.auc=TRUE, main = "Bagging")
+
+# SVM ROC
+pROC_obj <- roc(train_data_small$raintomorrow, svm.predictions,
+            smoothed = T, stratified=FALSE,
+            plot=TRUE, auc.polygon=T, max.auc.polygon=T, grid=TRUE,
+            print.auc=TRUE, main = "SVM")
+```
+
+A perfect model (100% accuracy) would achieve an area under the curve (AUC) of 1. A more realistic goal is to achieve an AUC of >= 0.90%. To do so with the models above, both models need to do a better job at classifying true positives (true positive rate = sensitivity). Bagging results in a higher AUC.
+
+## Perform Double CV-10 (nested 10-fold cross validation)
+
+Training is performed with bagging and linear SVM. For every fold of the outer loop, the inner loop performs 10-fold cross validation. The best model of the inner CV-10 is then trained on the outer folds and used to make predictions.
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+start_time <- Sys.time()
+set.seed(3)
+
+# set hyperparameters
+k = 10
+p = ncol(train_data_small)-1
+n <- nrow(train_data_small)
+n_models = 2
+
+# create sampling groups
+cvgroups.out = generate_cvgroups(k, n)
+
+# define containers for predictions
+double.cv.predictions = rep(NA, n)
+
+# perform outer cross-validation loop
+iteration_num = 1
+
+for (i in 1:k)  {
+  train_indices_cv = (cvgroups.out != i)
+  validation_indices_cv = (cvgroups.out == i)
+  validation_data_cv = train_data_small[validation_indices_cv,]
+
+  # re-sample training observations
+  resampled_cvgroups = generate_cvgroups(k, n)
+  
+  # define container for results
+  cv10.model.comparison <- matrix(NA, nr = k, nc = n_models)
+
+  for(j in 1:k) {
+    # print countdown
+    printf("\rIteration %d out of %d", iteration_num, k^2, file = "")
+    
+    # define validation data
+    train_indices_resampled = (resampled_cvgroups != j)
+    validation_indices_resampled = (resampled_cvgroups == j)
+    validation_data_resampled = train_data_small[validation_indices_resampled,]
+    validation_data_resampled_y = train_data_small[validation_indices_resampled, "raintomorrow"]
+
+    # fit models
+    rf.fit = randomForest(new_formula, data = train_data_small, subset = train_indices_resampled)
+    svm.fit = svm(new_formula, data = train_data_small, kernel="linear", scale=FALSE, type="C-classification", subset = train_indices_resampled)
+
+    # make predictions
+    rf.predictions = predict(rf.fit, validation_data_resampled, type="class")
+    svm.predictions = predict(svm.fit, validation_data_resampled, type="class")
+
+    cv10.model.comparison[j, 1] = get_accuracy(rf.predictions, validation_data_resampled_y, "no")
+    cv10.model.comparison[j, 2] = get_accuracy(svm.predictions, validation_data_resampled_y, "no")
+    
+    iteration_num = iteration_num + 1
+  }
+  
+  if(i == 1) {
+    cv10.model.total.comparison <- cv10.model.comparison
+  } else {
+    cv10.model.total.comparison <- rbind(cv10.model.total.comparison, cv10.model.comparison)
+  }
+
+  highest_accuracy_model <- which.max(apply(cv10.model.comparison, 2, mean))
+
+  if(highest_accuracy_model == 1) {
+    rf.fit <- randomForest(new_formula, data = train_data_small, subset = train_indices_cv)
+    double.cv.predictions[validation_indices_cv] <- predict(rf.fit, validation_data_cv, type="class")
+  } else {
+    svm.fit <- svm(new_formula, data = train_data_small, kernel="linear", scale=FALSE, type="C-classification")
+    double.cv.predictions[validation_indices_cv] <- predict(svm.fit, validation_data_cv, type="class")
+  }
+}
+
+printf("\n")
+end_time <- Sys.time()
+
+end_time - start_time
+```
+
+Calculation time: `r round(end_time - start_time,1)` minutes
+
+### Results of double CV-10:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Compute confusion matrix of random forest and SVM
+double.cv.accuracy <- get_accuracy(double.cv.predictions, train_data_small$raintomorrow)
+cat("\nAccuracy of double CV-10: ", double.cv.accuracy)
+```
+
+Double CV-10 adds another layer of cross-validation, which gives an improved approximation of the model's prediction accuracy on the test data.
+
+# Parameter tuning for SVM and comparison to other models
+
+3 things happen below:
+
+1. We perform grid search CV-10 on 10 randomly chosen cost parameters for SVM.
+* Random forest was already tuned during the feature selection stage.
+2. We will also perform CV-10 on three other models: random forest with mtry = p, neural net, and LDA (linear discriminant analysis)... If all 4 models in this analysis (SVM, random forest, neural net and LDA) have similar test set prediction accuracies - then its possible that we have peaked in prediction accuracy with this set of predictors.
+3. Parallel processing is used to improve training time.
+
+**Note:** After complete cross-validation of each model, Caret's *train* function returns the final model which is trained on the full training set.
+
+```{r message=FALSE, warning=FALSE}
+set.seed(6)
+
+start_time <- Sys.time()
+
+# define cores and register parallel computation operation
+cl <- makePSOCKcluster(detectCores())
+registerDoParallel(cl)
+
+# set grid search hyperparameters
+max_hyperparams = 10
+
+# define additional hyperparameters
+tr.Control <- trainControl(method='cv',
+                          number=10,
+                          allowParallel = T,
+                          verboseIter = F,
+                          classProbs = TRUE)
+
+# define grids for methods
+mlp.grid <- expand.grid(layer1 = 10, layer2 = 7, layer3 = 2)
+svm.grid <- expand.grid(C = sort(c(sample(seq(.01, 1, .1), max_hyperparams/2), sample(seq(1, 20, 2), max_hyperparams/2))))
+bagging.grid <- expand.grid(mtry = length(predictors))
+
+# train models
+svm.fit <- train(new_formula, data = train_data_small, method = "svmLinear", trControl=tr.Control, tuneGrid = svm.grid)
+bagging.fit <- train(new_formula, data = train_data_small, method = "parRF", trControl=tr.Control, tuneGrid = bagging.grid)
+# mlp is the same as nnet but allows multiple hidden layers
+nn.fit <- train(new_formula, data = train_data_small, method = "mlpML", trControl= tr.Control, tuneGrid = mlp.grid, metric="ROC")
+lda.fit <- train(new_formula, data = train_data_small, method = "lda", trControl= tr.Control)
+
+stopCluster(cl)
+
+end_time <- Sys.time()
+
+end_time - start_time
+```
+
+Calculation time: `r round(end_time - start_time,1)` minutes
+
+## Predictions on the (compact) test data with the final model of each method
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# predictions for tuned SVM
+svm.fit.preds <- predict(svm.fit, test_data_small)
+svm.tuning.accuracy <- get_accuracy(svm.fit.preds, test_data_small$raintomorrow, "no")
+cat("Accuracy of SVM model with C = ", as.numeric(svm.fit$bestTune), ":", svm.tuning.accuracy)
+
+# predictions for bagging
+bagging.fit.preds <- predict(bagging.fit, test_data_small)
+bagging.accuracy <- get_accuracy(bagging.fit.preds, test_data_small$raintomorrow, "no")
+cat("\nAccuracy of bagging model:", bagging.accuracy)
+
+# predictions for NN
+nn.fit.preds <- predict(nn.fit, test_data_small)
+nn.accuracy <- get_accuracy(nn.fit.preds, test_data_small$raintomorrow, "no")
+cat("\nAccuracy of neural net with 3 layers:", nn.accuracy)
+
+# predictions for LDA
+lda.fit.preds <- predict(lda.fit, test_data_small)
+lda.accuracy <- get_accuracy(lda.fit.preds, test_data_small$raintomorrow, "no")
+cat("\nAccuracy of LDA:", lda.accuracy)
+```
+
+SVM produces the best model of those trained with `r round(svm.tuning.accuracy,4)*100`% accuracy on the compact test set. A shallow neural net with 3 layers and LDA come in 2nd and 3rd, with scores of `r round(nn.accuracy,4)*100`% and `r round(lda.accuracy,4)*100`%, respectively. Bagging arrives last at `r round(bagging.accuracy,3)*100`%
+
+## Best model predictions on test data
+
+```{r}
+best_model_fit = svm(new_formula, data = train_data, kernel = "linear", scale=FALSE, type="C-classification", cost = svm.fit$bestTune)
+test_predictions <- predict(best_model_fit, test_data)
+test_accuracy <- get_accuracy(test_predictions, test_data$raintomorrow)
+cat("\nBest model accuracy on test data:", test_accuracy)
+```
+
+## Best model predictions on full data
+
+```{r}
+all_data <- rbind(train_data, test_data)
+final_fit = svm(new_formula, data = all_data, kernel = "linear", scale=FALSE, type="C-classification", cost = svm.fit$bestTune)
+final_predictions <- predict(final_fit, all_data)
+full_accuracy <- get_accuracy(final_predictions, all_data$raintomorrow)
+cat("\nAccuracy on all data:", full_accuracy)
+```
+
+# Conclusion
+
+The methodology and process used in this analysis results in a prediction accuracy of ~`r round(test_accuracy,3)*100`% on the test data of `r nrow(test_data)` observations (~`r round(nrow(test_data)/nrow(train_data)*100)`% of the training data size of `r nrow(train_data)`). I believe that a deep neural network would probably be the best model to achieve >= 90% prediction accuracy. In order to attain at least 90% rain prediction accuracy without a deep neural net, this current dataset would have to be upgraded with more valuable features, such as detailed forecasts, oceanic readings, atmospheric readings at different altitudes, and intra-daily (at least hourly) weather changes.
+
+Furthermore, as tested in this analysis through the utilization of lags of *RainToday* and percent of prior *n* day's rain, autoregressive time series analysis for rain prediction is not useful for rain prediction, even in addition to existing atmospheric predictors. A possibly useful autoregressive approach would be spatial autoregressive classification.
+
+# References
+
+[1] p. 378, An Introduction to Statistical Learning
+
