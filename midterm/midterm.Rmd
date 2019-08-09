@@ -105,6 +105,7 @@ x = model.matrix(Retailprice~., data=cars)[,c(-1)]
 
 ### Next, analyze the distribution of the response variable, test for normality, and plot observations
 ```{r echo = TRUE, eval = TRUE, tidy = TRUE}
+par(mfrow=c(2,2))
 # create histogram of retail prices
 hist(cars$Retailprice, main = "Histogram of Retail price", xlab = "Retail Price")
 
@@ -525,7 +526,7 @@ predict.regsubsets <- function(object, newdata, id, ...) {
 }
 ```
 
-```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=TRUE}
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
 # specify num observations, num max predictors, and groups to designate each observation to
 p = dim(cars)[2]-2
 
