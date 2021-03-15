@@ -27,49 +27,46 @@ pacman::p_load(randomForest, glmnet, boot, FNN, gbm, leaps, HH, formatR)
 
 # Project Summary
 
-The purpose of this project is to model a dataset using appropriate machine learning methods in order to produce maximally accurate predictions that have relevant non-technical applications. Said differently, the primary technical goals are to:
+The goals of this project are to:
 
-* Make reasonably accurate predictions of the response variable given a set of predictors.
 * Identify the most influential predictor variables.
-
-The primary *non*-technical goals are to:
-
 * Compare two response variables in the dataset.
-* Briefly explain how the predictive capabilities of the model may benefit individuals with some relationship to the context of the data or field from which it originated.
+* Make reasonably accurate predictions of the response variable given a set of predictors.
+* Briefly explain how the predictive capabilities of the model may benefit individuals.
 
-# Project Structure and Results
+# Project Results
 
-This project is structured into two parts that commence directly below. There is an explanation of results (conclusion) at the end of Part 2. To summarize the conclusion:
+To summarize the results of the project:
 
 * The final predictive model achieves ~96% predictive accuracy on the full dataset.
 * 5 predictors (out of 14) reduce 80% of the total variation in the model.
 * RandomForest regression appears to be well-suited to further modeling test data.
 
+This project is organized into 2 parts.
+
 # Part 1
 
-The dataset I selected for this project was the **2004 New Car and Truck** data (http://ww2.amstat.org/publications/jse/datasets/04cars.txt). This dataset has the following characteristics (as addressed in the assignment):
+The dataset selected for this project is the **2004 New Car and Truck** data (http://ww2.amstat.org/publications/jse/datasets/04cars.txt). This dataset has:
 
 * 14 predictors, multiple missing values (consider variables and/or observations)
-* Factor response: Type (AWD is all-wheel drive, RWD is read-wheel drive, and Other)
-* Quantitative response: Retailprice
+* Categorical response variable: Type (AWD is all-wheel drive, RWD is read-wheel drive, and Other)
+* Numerical response variable: Retailprice
 
 ## Part 1a. Response variable selection
 
-I selected *Retailprice* as the (quantitative) response variable for this exercise. Regressing *Retailprice* on other vehicle attributes (variables) is useful for the purpose of understanding which attributes are most influential (on retail price). And this is ultimately the question that I seek to answer: of the given predictors in this dataset, which of them contribute most to the retail price of a vehicle?
+*Retailprice* is used as response variable for this exercise. Regressing *Retailprice* on other vehicle attributes is useful for understanding which attributes are the most influential predictors.
 
-## Part 1b. Practical purposes to data analysis and model creation
+## Part 1b. Practical purposes for data analysis and modeling
 
 There are numerous practical purposes to this data analysis. For example, by understanding the relationship between the response variable and predictors in this dataset, it is possible for:
 
 * Car dealership salespeople to optimally price vehicles.
 * Auto manufacturers to design vehicles with specific features to maximize retail value.
-* Consumers to estimate the true value of a vehicle they are considering purchasing.
-
-The primary audience for this data analysis are individuals that are concerned with the retail price of vehicles. Such individuals may work in the automotive manufacturing industry, in the auto sales industry, or are simply consumers of vehicles that are looking to maximize the return on their investment.
+* Consumers to estimate the value of a vehicle they are considering purchasing.
 
 # Part 2
 
-Prior to answering Part 2a, it is necessary to first analyze the data.
+First, it is necessary to analyze the data.
 
 ### Read in the data
 
@@ -83,7 +80,7 @@ cars <- read.csv("04cars.csv")
 # Get count of observations
 n = dim(cars)[1]
 
-# Get count observations without missing values
+# Get count of observations without missing values
 n.complete <- length(which(complete.cases(cars)))
 
 # Return cleaned cars dataset without Type
@@ -124,17 +121,17 @@ shapiro.test(cars$Retailprice)
 plot(1:n.complete,cars$Retailprice, xlab="Vehicle Number", ylab="Retail Price", main = "Retail price by vehicle in ascending order")
 ```
 
-### Summary of operations above:
+### Summary:
 
 * *Retailprice* is highly right-skewed.
 * There are 25 outliers out of 387 observations (~7.0%)
-* The Shapiro-Wilk tests confirms (at the 5% significance level) that *Retailprice* is non-normally distributed (P = ~0)
+* The Shapiro-Wilk tests confirms (at the 5% significance level) that *Retailprice* is non-normally distributed
 * The Q-Q Plot indicates that the sample distribution does not derive from a hypothetically normal distribution.
 * And finally, the plot of *Retailprice* over index indicates that *Retailprice* belongs to a non-linear distribution at the population level of cars and trucks from 2004.
 
 ## (Part 2a.) Identify two possible methods (from two different lessons) for predicting the response and provide justification for why these methods are appropriate for the data.*
 
-Out of the 7+ regression methods that we have covered thus far, 2 are among the most preferred for this exercise, in my opinion. They are regularizied regression/shrinkage methods (Ridge, LASSO, Elastic Net) and RandomForest regression:
+Out of the 7+ regression methods that we have covered thus far, 2 are among the most preferred for this exercise. They are regularizied regression/shrinkage methods (Ridge, LASSO, Elastic Net) and RandomForest regression:
 
 * Regularized regression is a suitable choice because it enables us to predict the response variable on the basis of *multiple* predictor variables while decreasing test variance through the use of a penalty parameter (lambda).
 * RandomForest regression is based on training decision trees on bootstrapped samples of data. It excels in reducing test variance by limiting the random subset of predictors that are considered at each split of the tree, effectively decorrelating trees that are fit to samples ^[1]^. Furthermore, RandomForest is an applicable approach to modeling this data because it is well-suited to handle qualitative variables ^[2]^ and also offers high model interpretability, which is a benefit in cases when the response variable is financial. 
@@ -498,7 +495,7 @@ for(i in 1:k) {
 ```
 
 ```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, include=FALSE}
-vif(glm.fit)
+# vif(glm.fit)
 ```
 
 ### Calculate CV10 and R2 scores:
