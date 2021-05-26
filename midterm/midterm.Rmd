@@ -245,7 +245,7 @@ models_r2[2] <- glm_cv_r2
 
 ### Results of operations above:
 
-* The CV10 RandomForest model is superior to the best regularization model above (alpha = 0.2, lambda = 174.75). RandomForest results in an R2 of ~0.78 and CV10 of 84332155, while E-Net produces an R2 of ~0.71 and a CV10 of 111741019 Therefore, we will test double 10-fold cross-validation with RandomForest regression.
+* The CV10 RandomForest model is superior to the best regularization model above (alpha = 0.2, lambda = 174.75). RandomForest results in an R2 of `r round(randomforest_R2,2)` and CV10 of `r round(randomforest_cv_error,2)`, while E-Net produces an R2 of `r round(glm_cv_r2,2)` and a CV10 of `r round(glm_cv,2)` Therefore, we will test double 10-fold cross-validation with RandomForest regression.
 
 ## (Part 2c.) Add an outer level of cross-validation to further assess the predictive ability of the model selected.
 
@@ -338,24 +338,14 @@ varImpPlot(final.model)
 
 # Conclusion
 
-The final model (RandomForest with mtry=7), produces the following CV and R2 scores:
-
-**Double CV10:**
-
-* RF double CV10 MSE:  80089867 
-* RF double CV10 R2:  0.7936125
-
-**OOB Predictions:**
-
-* Final model OOB MSE:  74368100 
-* Final model OOB R2:  0.8083572
+The final model (RandomForest with mtry=7), produces the following results:
 
 **Full data predictions:**
 
 * Final model MSE:  16820857 
-* Final model R2:  0.9566535 
+* Final model R2:  `r round(test.r2, 2)`
 
-Given the small size of this dataset, the MSE and R2 scores achieved through RandomForest regression with double CV10 and OOB predictions indicate that this model shows promise of delivering accurate predictions on test data. The final RandomForest model, when fitted to the full dataset, produces an R2 of nearly 0.96.
+Given the small size of this dataset, the MSE and R2 scores achieved through RandomForest regression with double CV10 and OOB predictions indicate that this model shows promise of delivering accurate predictions on test data. The final RandomForest model, when fitted to the full dataset, produces an R2 of ~0.95.
 
 The most important (positively correlated) predictors on retail price were: horsepower, wheelbase, cylinders, height, and highway mpg. Furthermore, the plot of variable importance indicates that the final model could benefit in accuracy by excluding certain predictors such as "pickup".
 
